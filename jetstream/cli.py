@@ -1,8 +1,10 @@
 from datetime import datetime, timedelta
 
+import cattr
 import click
 import os
 import logging
+import json
 from pathlib import Path
 import pytz
 import sys
@@ -10,7 +12,7 @@ import toml
 
 from . import experimenter
 from .config import AnalysisSpec
-from .experimenter import ExperimentCollection
+from .experimenter import ExperimentCollection, Experiment
 from .export_json import export_statistics_tables
 from .analysis import Analysis
 from .external_config import ExternalConfigCollection
@@ -291,3 +293,85 @@ def validate_config(path):
         Analysis("no project", "no dataset", conf).validate()
 
         click.echo(f"Config file at {file} is valid.", err=False)
+
+
+# methods required for running via argo
+
+@cli.command("get_active_experiments")
+@project_id_option
+@dataset_id_option
+@click.option(
+    "--date",
+    type=ClickDate(),
+    help="Date for which experiments should be analyzed",
+    metavar="YYYY-MM-DD",
+    required=True,
+)
+@experiment_slug_option
+def active_experiments(project_id, dataset_id, date, experiment_slug):
+    """
+    Runs analysis on active experiments for the provided date.
+
+    This command is invoked by Airflow. All errors are written to the console and
+    BigQuery. Runs will always return a success code, even if exceptions were
+    thrown during some experiment analyses. This ensures that the Airflow task will
+    not retry the task and run all of the analyses again.
+    """
+    # fetch experiments that are still active
+    collection = ExperimentCollection.from_experimenter()
+
+    active_experiments = collection.end_on_or_after(date).of_type(
+        ("pref", "addon", "message", "v4")
+    )
+
+    if experiment_slug is not None:
+        # run analysis for specific experiment
+        active_experiments = active_experiments.with_slug(experiment_slug)
+
+    converter = cattr.Converter()
+    converter.register_unstructure_hook(datetime, lambda d: str(d.date()))
+    json.dump(converter.unstructure(active_experiments), sys.stdout)
+
+@cli.command("analyse_experiment")
+@project_id_option
+@dataset_id_option
+@click.option(
+    "--date",
+    type=ClickDate(),
+    help="Date for which experiments should be analyzed",
+    metavar="YYYY-MM-DD",
+    required=True,
+)
+@click.option(
+    "--experiment_json",
+    help="Experiment JSON",
+    required=True,
+)
+def analyse_experiment(project_id, dataset_id, date, experiment_json):
+    # get experiment-specific external configs
+    external_configs = ExternalConfigCollection.from_github_repo()
+
+    converter = cattr.Converter()
+    converter.register_structure_hook(
+        datetime,
+        lambda num, _: pytz.utc.localize(datetime.strptime(num, "%Y-%m-%d")),
+    )
+
+    experiment = converter.structure(json.loads(experiment_json), Experiment)
+
+    # calculate metrics for experiments and write to BigQuery
+    try:
+        spec = default_spec_for_experiment(experiment)
+
+        external_experiment_config = external_configs.spec_for_experiment(
+            experiment.normandy_slug
+        )
+
+        if external_experiment_config:
+            spec.merge(external_experiment_config)
+
+        config = spec.resolve(experiment)
+
+        Analysis(project_id, dataset_id, config).run(date)
+    except Exception as e:
+        logger.exception(str(e), exc_info=e, extra={"experiment": experiment.normandy_slug})

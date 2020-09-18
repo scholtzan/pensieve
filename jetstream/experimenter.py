@@ -55,6 +55,15 @@ class Experiment:
     proposed_enrollment: Optional[int]
     reference_branch: Optional[str]
 
+    @classmethod
+    def from_dict(cls, d) -> "Experiment":
+        converter = cattr.Converter()
+        converter.register_structure_hook(
+            dt.datetime,
+            lambda num, _: pytz.utc.localize(dt.datetime.strptime(num, "%Y-%m-%d")),
+        )
+        return converter.structure(d, cls)
+
 
 @attr.s(auto_attribs=True, kw_only=True, slots=True, frozen=True)
 class ExperimentV1:

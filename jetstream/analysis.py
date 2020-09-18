@@ -179,8 +179,8 @@ class Analysis:
                 self.config.experiment.normandy_slug,
                 period.value,
             )
-            self.bigquery.execute(sql, res_table_name)
-            self._publish_view(period)
+            # self.bigquery.execute(sql, res_table_name)
+            # self._publish_view(period)
 
         return res_table_name
 
@@ -344,19 +344,21 @@ class Analysis:
                 start_date=self.config.experiment.start_date.strftime("%Y-%m-%d"),
             )
 
-            metrics_table = self._calculate_metrics(exp, time_limits, period, dry_run)
+            print(f"Run analysis for {self.config.experiment.normandy_slug}")
 
-            if dry_run:
-                logger.info(
-                    "Not calculating statistics %s (%s); dry run",
-                    self.config.experiment.normandy_slug,
-                    period.value,
-                )
-                continue
+            # metrics_table = self._calculate_metrics(exp, time_limits, period, dry_run)
 
-            self._calculate_statistics(metrics_table, period)
-            logger.info(
-                "Finished running query for %s (%s)",
-                self.config.experiment.normandy_slug,
-                period.value,
-            )
+            # if dry_run:
+            #     logger.info(
+            #         "Not calculating statistics %s (%s); dry run",
+            #         self.config.experiment.normandy_slug,
+            #         period.value,
+            #     )
+            #     continue
+
+            # self._calculate_statistics(metrics_table, period)
+            # logger.info(
+            #     "Finished running query for %s (%s)",
+            #     self.config.experiment.normandy_slug,
+            #     period.value,
+            # )
