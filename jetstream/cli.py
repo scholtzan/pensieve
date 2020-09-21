@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta
 
+import attr
 import cattr
 import click
+import codecs
 import os
 import logging
 import json
@@ -9,16 +11,20 @@ from pathlib import Path
 import pytz
 import sys
 import toml
+import pickle
+from typing import Optional
 
 from . import experimenter
-from .config import AnalysisSpec
+from .config import AnalysisSpec, AnalysisConfiguration, ExperimentSpec
 from .experimenter import ExperimentCollection, Experiment
 from .export_json import export_statistics_tables
 from .analysis import Analysis
-from .external_config import ExternalConfigCollection
+from .external_config import ExternalConfigCollection, ExternalConfig
 from .logging.bigquery_log_handler import BigQueryLogHandler
 from .bigquery_client import BigQueryClient
 from . import bq_normalize_name, AnalysisPeriod
+from .nimbus import _FeatureResolver, ResolvesFeatures
+
 
 DEFAULT_METRICS_CONFIG = Path(__file__).parent / "config" / "default_metrics.toml"
 CFR_METRICS_CONFIG = Path(__file__).parent / "config" / "cfr_metrics.toml"
@@ -246,7 +252,8 @@ def rerun(project_id, dataset_id, experiment_slug, config_file):
 @bucket_option
 def export_statistics_to_json(project_id, dataset_id, bucket):
     """Export all tables as JSON to a GCS bucket."""
-    export_statistics_tables(project_id, dataset_id, bucket)
+    print("Export data to GCS as JSON")
+    # export_statistics_tables(project_id, dataset_id, bucket)
 
 
 @cli.command("rerun_config_changed")
@@ -297,6 +304,12 @@ def validate_config(path):
 
 # methods required for running via argo
 
+@attr.s(auto_attribs=True)
+class AnalysisRunConfig:
+    date: datetime
+    experiment: Experiment
+    external_config: Optional[ExternalConfig]
+
 @cli.command("get_active_experiments")
 @project_id_option
 @dataset_id_option
@@ -307,8 +320,7 @@ def validate_config(path):
     metavar="YYYY-MM-DD",
     required=True,
 )
-@experiment_slug_option
-def active_experiments(project_id, dataset_id, date, experiment_slug):
+def active_experiments(project_id, dataset_id, date):
     """
     Runs analysis on active experiments for the provided date.
 
@@ -319,59 +331,54 @@ def active_experiments(project_id, dataset_id, date, experiment_slug):
     """
     # fetch experiments that are still active
     collection = ExperimentCollection.from_experimenter()
+    external_configs = ExternalConfigCollection.from_github_repo()
 
     active_experiments = collection.end_on_or_after(date).of_type(
         ("pref", "addon", "message", "v4")
     )
 
-    if experiment_slug is not None:
-        # run analysis for specific experiment
-        active_experiments = active_experiments.with_slug(experiment_slug)
+    experiment_runs_configs = []
 
     converter = cattr.Converter()
     converter.register_unstructure_hook(datetime, lambda d: str(d.date()))
-    json.dump(converter.unstructure(active_experiments), sys.stdout)
 
-@cli.command("analyse_experiment")
-@project_id_option
-@dataset_id_option
-@click.option(
-    "--date",
-    type=ClickDate(),
-    help="Date for which experiments should be analyzed",
-    metavar="YYYY-MM-DD",
-    required=True,
-)
-@click.option(
-    "--experiment_json",
-    help="Experiment JSON",
-    required=True,
-)
-def analyse_experiment(project_id, dataset_id, date, experiment_json):
-    # get experiment-specific external configs
-    external_configs = ExternalConfigCollection.from_github_repo()
-
-    converter = cattr.Converter()
-    converter.register_structure_hook(
-        datetime,
-        lambda num, _: pytz.utc.localize(datetime.strptime(num, "%Y-%m-%d")),
-    )
-
-    experiment = converter.structure(json.loads(experiment_json), Experiment)
-
-    # calculate metrics for experiments and write to BigQuery
-    try:
+    for experiment in active_experiments.experiments:
         spec = default_spec_for_experiment(experiment)
 
         external_experiment_config = external_configs.spec_for_experiment(
             experiment.normandy_slug
         )
 
-        if external_experiment_config:
-            spec.merge(external_experiment_config)
+        config = spec.resolve(experiment, date)
+        experiment_runs_configs.append(AnalysisRunConfig(date, experiment, external_experiment_config))
 
-        config = spec.resolve(experiment)
+    json.dump(converter.unstructure(experiment_runs_configs), sys.stdout)
 
-        Analysis(project_id, dataset_id, config).run(date)
+@cli.command("analyse_experiment")
+@project_id_option
+@dataset_id_option
+@click.option(
+    "--experiment_json",
+    help="Experiment JSON",
+    required=True,
+)
+def analyse_experiment(project_id, dataset_id, experiment_json):
+    converter = cattr.Converter()
+    converter.register_structure_hook(
+        datetime,
+        lambda num, _: pytz.utc.localize(datetime.strptime(num, "%Y-%m-%d")),
+    )
+    analysis_run_config = converter.structure(json.loads(experiment_json), AnalysisRunConfig)
+
+    spec = default_spec_for_experiment(analysis_run_config.experiment)
+
+    if analysis_run_config.external_config:
+        spec.merge(analysis_run_config.external_config)
+
+    config = spec.resolve(analysis_run_config.experiment)
+
+    # calculate metrics for experiments and write to BigQuery
+    try:
+        Analysis(project_id, dataset_id, config).run(analysis_run_config.date)
     except Exception as e:
-        logger.exception(str(e), exc_info=e, extra={"experiment": experiment.normandy_slug})
+        logger.exception(str(e), exc_info=e, extra={"experiment": analysis_run_config.analysis_config.normandy_slug})
