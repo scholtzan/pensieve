@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 
 import attr
 import cattr
+import base64
 import click
 import codecs
 import os
@@ -304,11 +305,13 @@ def validate_config(path):
 
 # methods required for running via argo
 
+
 @attr.s(auto_attribs=True)
 class AnalysisRunConfig:
     date: datetime
     experiment: Experiment
-    external_config: Optional[ExternalConfig]
+    external_config: Optional[AnalysisSpec]
+
 
 @cli.command("get_active_experiments")
 @project_id_option
@@ -320,7 +323,8 @@ class AnalysisRunConfig:
     metavar="YYYY-MM-DD",
     required=True,
 )
-def active_experiments(project_id, dataset_id, date):
+@click.pass_context
+def active_experiments(ctx, project_id, dataset_id, date):
     """
     Runs analysis on active experiments for the provided date.
 
@@ -343,16 +347,20 @@ def active_experiments(project_id, dataset_id, date):
     converter.register_unstructure_hook(datetime, lambda d: str(d.date()))
 
     for experiment in active_experiments.experiments:
-        spec = default_spec_for_experiment(experiment)
+        external_experiment_config = external_configs.spec_for_experiment(experiment.normandy_slug)
 
-        external_experiment_config = external_configs.spec_for_experiment(
-            experiment.normandy_slug
+        experiment_runs_configs.append(
+            base64.b64encode(
+                json.dumps(
+                    converter.unstructure(
+                        AnalysisRunConfig(date, experiment, external_experiment_config)
+                    )
+                ).encode()
+            ).decode("utf-8")
         )
 
-        config = spec.resolve(experiment, date)
-        experiment_runs_configs.append(AnalysisRunConfig(date, experiment, external_experiment_config))
+    json.dump(experiment_runs_configs, sys.stdout)
 
-    json.dump(converter.unstructure(experiment_runs_configs), sys.stdout)
 
 @cli.command("analyse_experiment")
 @project_id_option
@@ -368,12 +376,14 @@ def analyse_experiment(project_id, dataset_id, experiment_json):
         datetime,
         lambda num, _: pytz.utc.localize(datetime.strptime(num, "%Y-%m-%d")),
     )
-    analysis_run_config = converter.structure(json.loads(experiment_json), AnalysisRunConfig)
+    analysis_run_config = converter.structure(
+        json.loads(base64.b64decode(experiment_json.encode()).decode("utf-8")), AnalysisRunConfig
+    )
 
     spec = default_spec_for_experiment(analysis_run_config.experiment)
 
-    if analysis_run_config.external_config:
-        spec.merge(analysis_run_config.external_config)
+    # if analysis_run_config.external_config:
+    #     spec.merge(analysis_run_config.external_config)
 
     config = spec.resolve(analysis_run_config.experiment)
 
@@ -381,4 +391,6 @@ def analyse_experiment(project_id, dataset_id, experiment_json):
     try:
         Analysis(project_id, dataset_id, config).run(analysis_run_config.date)
     except Exception as e:
-        logger.exception(str(e), exc_info=e, extra={"experiment": analysis_run_config.analysis_config.normandy_slug})
+        logger.exception(
+            str(e), exc_info=e, extra={"experiment": analysis_run_config.experiment.normandy_slug}
+        )
