@@ -245,11 +245,11 @@ class Analysis:
         job_config.write_disposition = bigquery.job.WriteDisposition.WRITE_TRUNCATE
 
         # wait for the job to complete
-        self.bigquery.load_table_from_json(
-            results, f"statistics_{metrics_table}", job_config=job_config
-        )
+        # self.bigquery.load_table_from_json(
+        #     results, f"statistics_{metrics_table}", job_config=job_config
+        # )
 
-        self._publish_view(period, table_prefix="statistics")
+        # self._publish_view(period, table_prefix="statistics")
 
     def check_runnable(self, current_date: Optional[datetime] = None) -> bool:
         if self.config.experiment.normandy_slug is None:
@@ -346,19 +346,19 @@ class Analysis:
 
             print(f"Run analysis for {self.config.experiment.normandy_slug}")
 
-            # metrics_table = self._calculate_metrics(exp, time_limits, period, dry_run)
+            metrics_table = self._calculate_metrics(exp, time_limits, period, dry_run)
 
-            # if dry_run:
-            #     logger.info(
-            #         "Not calculating statistics %s (%s); dry run",
-            #         self.config.experiment.normandy_slug,
-            #         period.value,
-            #     )
-            #     continue
+            if dry_run:
+                logger.info(
+                    "Not calculating statistics %s (%s); dry run",
+                    self.config.experiment.normandy_slug,
+                    period.value,
+                )
+                continue
 
-            # self._calculate_statistics(metrics_table, period)
-            # logger.info(
-            #     "Finished running query for %s (%s)",
-            #     self.config.experiment.normandy_slug,
-            #     period.value,
-            # )
+            self._calculate_statistics(metrics_table, period)
+            logger.info(
+                "Finished running query for %s (%s)",
+                self.config.experiment.normandy_slug,
+                period.value,
+            )

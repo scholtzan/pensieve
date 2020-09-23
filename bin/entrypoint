@@ -14,6 +14,9 @@ elif [ "$1" = "get_active_experiments" ]; then
 elif [ "$1" = "analyse_experiment" ]; then
     # argo
     jetstream analyse_experiment "${@:2}"
+elif [ "$1" = "rerun_experiment" ]; then
+    # argo
+    jetstream rerun_experiment "${@:2}"
 else
     # this is triggered by Airflow
     jetstream --log_to_bigquery run "$@"

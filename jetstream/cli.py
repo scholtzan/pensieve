@@ -303,14 +303,113 @@ def validate_config(path):
         click.echo(f"Config file at {file} is valid.", err=False)
 
 
-# methods required for running via argo
+### THIS SECTION IS FOR USAGE WITH ARGO ###
+
+# a entrypoint for launching daily and on-demand runs can be provided here
+# [todo]
+
+# from argo.workflows.client import V1alpha1Api
+# from argo.workflows.config import load_kube_config
+
+# @cli.command("run")
+# @project_id_option
+# @dataset_id_option
+# @click.option(
+#     "--date",
+#     type=ClickDate(),
+#     help="Date for which experiments should be analyzed",
+#     metavar="YYYY-MM-DD",
+#     required=True,
+# )
+# def run(project_id, dataset_id, date):
+#     """Launch daily analysis run using Argo"""
+#     load_kube_config()
+#     v1alpha1 = V1alpha1Api()
+#     namespace = "jetstream-argo"
+#
+#     # todo: set analysis date in config
+#     workflow_definition = yaml.safe_load("workflows/worfklow.yaml")
+#     v1alpha1.create_namespaced_workflow(namespace, workflow_definition)
+
+# @cli.command("rerun")
+# @project_id_option
+# @dataset_id_option
+# @experiment_slug_option
+# def run(project_id, dataset_id, slug):
+#     """Launch daily analysis run using Argo"""
+#     load_kube_config()
+#     v1alpha1 = V1alpha1Api()
+#     namespace = "jetstream-argo"
+#
+#     # todo set slug in config
+#     workflow_definition = yaml.safe_load("workflows/rerun-workflow.yaml")
+#     v1alpha1.create_namespaced_workflow(namespace, workflow_definition)
+
+
+# We need to decode the config dict because it includes some Jinja templates.
+# Argo also uses Jinja templates for defining workflows, so when passing config
+# dicts to a step in the workflow it tries to evaluate the template and will fail.
+# To work around this, instead of passing the config dict as is, it is base64 encoded
+# instead, and decoded within the step.
+def encode_config(config):
+    """Base64 encodes a dict."""
+    converter = cattr.Converter()
+    converter.register_unstructure_hook(datetime, lambda d: str(d.date()))
+    return base64.b64encode(json.dumps(converter.unstructure(config)).encode()).decode("utf-8")
 
 
 @attr.s(auto_attribs=True)
 class AnalysisRunConfig:
+    """Run config used to defined what should be executed in a experiment analysis step."""
+
     date: datetime
     experiment: Experiment
     external_config: Optional[AnalysisSpec]
+
+
+@cli.command("rerun_experiment")
+@experiment_slug_option
+@project_id_option
+@dataset_id_option
+def rerun(project_id, dataset_id, experiment_slug):
+    """
+    Argo rerun.
+    """
+    collection = ExperimentCollection.from_experimenter()
+
+    experiments = collection.with_slug(experiment_slug)
+
+    if experiment_slug is None or len(experiments.experiments) == 0:
+        raise Exception(f"No experiment with slug {experiment_slug} found.")
+
+    experiment = experiments.experiments[0]
+
+    if experiment.end_date is None:
+        raise Exception(f"End date is missing for experiment {experiment_slug}")
+
+    end_date = min(
+        experiment.end_date,
+        datetime.combine(
+            datetime.now(tz=pytz.utc).date() - timedelta(days=1),
+            datetime.min.time(),
+            tzinfo=pytz.utc,
+        ),
+    )
+
+    # get experiment-specific external configs
+    external_configs = ExternalConfigCollection.from_github_repo()
+    external_experiment_config = external_configs.spec_for_experiment(experiment.normandy_slug)
+
+    # instead of having a custom AnalysisRunConfig, the final implementation should
+    # be able to serialize and deserialize config.AnalysisConfiguration so that this
+    # can be passed to analysis steps instead.
+    configs = [
+        encode_config(AnalysisRunConfig(date, experiment, external_experiment_config))
+        for date in inclusive_date_range(experiment.start_date, end_date)
+    ]
+
+    # Write config to stdout which will be read by argo and then used to spawn analysis jobs
+    json.dump(configs, sys.stdout)
 
 
 @cli.command("get_active_experiments")
@@ -349,16 +448,14 @@ def active_experiments(ctx, project_id, dataset_id, date):
     for experiment in active_experiments.experiments:
         external_experiment_config = external_configs.spec_for_experiment(experiment.normandy_slug)
 
+        # instead of having a custom AnalysisRunConfig, the final implementation should
+        # be able to serialize and deserialize config.AnalysisConfiguration so that this
+        # can be passed to analysis steps instead.
         experiment_runs_configs.append(
-            base64.b64encode(
-                json.dumps(
-                    converter.unstructure(
-                        AnalysisRunConfig(date, experiment, external_experiment_config)
-                    )
-                ).encode()
-            ).decode("utf-8")
+            encode_config(AnalysisRunConfig(date, experiment, external_experiment_config))
         )
 
+    # Write config to stdout which will be read by argo and then used to spawn analysis jobs
     json.dump(experiment_runs_configs, sys.stdout)
 
 
@@ -382,8 +479,8 @@ def analyse_experiment(project_id, dataset_id, experiment_json):
 
     spec = default_spec_for_experiment(analysis_run_config.experiment)
 
-    # if analysis_run_config.external_config:
-    #     spec.merge(analysis_run_config.external_config)
+    if analysis_run_config.external_config:
+        spec.merge(analysis_run_config.external_config)
 
     config = spec.resolve(analysis_run_config.experiment)
 
