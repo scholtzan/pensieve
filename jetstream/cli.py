@@ -7,6 +7,7 @@ from pathlib import Path
 import pytz
 import sys
 import toml
+from dask.distributed import Client, progress
 
 from . import experimenter
 from .config import AnalysisSpec
@@ -162,7 +163,9 @@ def run(project_id, dataset_id, date, experiment_slug, config_file):
 
             config = spec.resolve(experiment)
 
-            Analysis(project_id, dataset_id, config).run(date)
+            Analysis(project_id, dataset_id).run(
+                date, config
+            )
         except Exception as e:
             logger.exception(str(e), exc_info=e, extra={"experiment": experiment.normandy_slug})
 
