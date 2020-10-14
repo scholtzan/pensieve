@@ -347,12 +347,32 @@ class Analysis:
 
         self.check_runnable(config, current_date)
 
-        client = dask.distributed.Client(threads_per_worker=1, n_workers=1)
+        client = dask.distributed.Client(threads_per_worker=2, n_workers=4)
 
-        results = []
+        def calc_stat(m, segment_data, reference_branch, normandy_slug, segment):
+            stats = m.run(segment_data, reference_branch, normandy_slug).set_segment(segment)
+            return stats.to_dict()["data"]
+        
+        def calc_segment(segment, metrics_data, normandy_slug):
+            if segment != "all":
+                if segment not in metrics_data.columns:
+                    logger.error(
+                        f"Segment {segment} not in metrics table",
+                        extra={"experiment": normandy_slug},
+                    )
+                    return
+                segment_data = metrics_data[metrics_data[segment]]
+            else:
+                segment_data = metrics_data
+
+            return segment_data
+
+
+        stats_results = []
         calculate_metrics = dask.delayed(self._calculate_metrics)
-        calculate_statistics = dask.delayed(self._calculate_statistics)
-
+        do_stat_calc = dask.delayed(calc_stat)
+        table_to_dataframe = dask.delayed(self.bigquery.table_to_dataframe)
+        do_calc_segment = dask.delayed(calc_segment)
 
         for period in config.metrics:
             time_limits = self._get_timelimits_if_ready(period, current_date, config)
@@ -391,22 +411,75 @@ class Analysis:
                 )
                 continue
 
-            results.append(
-                calculate_statistics(
-                    metrics_table,
-                    period,
-                    config.experiment.normandy_slug,
-                    config.experiment.segments,
-                    config.experiment.branches,
-                    config.metrics,
-                    config.experiment.reference_branch
-                )
-            )
+
+            metrics_data = table_to_dataframe(metrics_table)
+
+            results = []
+
+            segment_labels = ["all"] + [s.name for s in config.experiment.segments]
+            for segment in segment_labels:
+                segment_data = do_calc_segment(segment, metrics_data, config.experiment.normandy_slug)
+                for m in config.metrics[period]:
+                    stats_results.append(do_stat_calc(m, segment_data, config.experiment.reference_branch, config.experiment.normandy_slug, segment))
+
+                # counts = (
+                #     Count()
+                #     .transform(segment_data, "*", "*", normandy_slug)
+                #     .set_segment(segment)
+                #     .to_dict()["data"]
+                # )
+                # results += counts
+
+                # add count=0 row to statistics table for missing branches
+                # missing_counts = StatisticResultCollection(
+                #     [
+                #         StatisticResult(
+                #             metric="identity",
+                #             statistic="count",
+                #             parameter=None,
+                #             branch=b.slug,
+                #             comparison=None,
+                #             comparison_to_branch=None,
+                #             ci_width=None,
+                #             point=0,
+                #             lower=None,
+                #             upper=None,
+                #             segment=segment,
+                #         )
+                #         for b in branches
+                #         if b.slug not in {c["branch"] for c in counts}
+                #     ]
+                # )
+
+                # results += missing_counts.to_dict()["data"]
+
+            job_config = bigquery.LoadJobConfig()
+            job_config.schema = StatisticResult.bq_schema
+            job_config.write_disposition = bigquery.job.WriteDisposition.WRITE_TRUNCATE
+
+            # wait for the job to complete
+            # self.bigquery.load_table_from_json(
+            #     results, f"statistics_{metrics_table}", job_config=job_config
+            # )
+
+            self._publish_view(period, normandy_slug=config.experiment.normandy_slug, table_prefix="statistics")
+
+            # results.append(
+            #     calculate_statistics(
+            #         metrics_table,
+            #         period,
+            #         config.experiment.normandy_slug,
+            #         config.experiment.segments,
+            #         config.experiment.branches,
+            #         config.metrics,
+            #         config.experiment.reference_branch
+            #     )
+            # )
             # logger.info(
             #     "Finished running query for %s (%s)",
             #     config.experiment.normandy_slug,
             #     period.value,
             # )
 
-        results = dask.compute(*results)
-        print(results)
+        stats_results = dask.compute(*stats_results)
+        print(stats_results)

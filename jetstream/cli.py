@@ -142,7 +142,7 @@ def run(project_id, dataset_id, date, experiment_slug, config_file):
         active_experiments = active_experiments.with_slug(experiment_slug)
 
     # get experiment-specific external configs
-    external_configs = ExternalConfigCollection.from_github_repo()
+    # external_configs = ExternalConfigCollection.from_github_repo()
 
     # calculate metrics for experiments and write to BigQuery
     for experiment in active_experiments.experiments:
